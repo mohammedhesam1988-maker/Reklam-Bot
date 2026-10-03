@@ -8,45 +8,50 @@ const TOKEN = process.env.TOKEN;
 const SERVER_INVITE = process.env.SERVER_INVITE;
 const AD_CHANNEL_ID = process.env.AD_CHANNEL_ID;
 
-// ═══════════════════════════════════════════
-//   سیستەمی سنووردانان
-// ═══════════════════════════════════════════
-const dailyLimits = new Map();
-const attempts = new Map();
-
+const AD_INTERVAL_MS = 30 * 1000;
+const TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const MAX_DAILY = 1;
 
+const dailyLimits = new Map();
+const postedLinks = new Map();
+const userAttempts = new Map();
+
+function getToday() {
+  return new Date().toDateString();
+}
+
 function hasUsedToday(userId) {
-  const today = new Date().toDateString();
   const record = dailyLimits.get(userId);
-  return record && record.date === today && record.count >= MAX_DAILY;
+  return record && record.date === getToday() && record.count >= MAX_DAILY;
 }
 
 function markUsed(userId) {
-  const today = new Date().toDateString();
-  dailyLimits.set(userId, { count: 1, date: today });
+  dailyLimits.set(userId, { count: 1, date: getToday() });
+}
+
+function isLinkPostedToday(link) {
+  const record = postedLinks.get(link);
+  return record === getToday();
+}
+
+function markLinkPosted(link) {
+  postedLinks.set(link, getToday());
 }
 
 function incrementAttempts(userId) {
-  const today = new Date().toDateString();
-  const record = attempts.get(userId);
-
-  if (!record || record.date !== today) {
-    attempts.set(userId, { count: 1, date: today });
+  const record = userAttempts.get(userId);
+  if (!record || record.date !== getToday()) {
+    userAttempts.set(userId, { count: 1, date: getToday() });
     return 1;
   }
-
   record.count += 1;
   return record.count;
 }
 
 function resetAttempts(userId) {
-  attempts.delete(userId);
+  userAttempts.delete(userId);
 }
 
-// ═══════════════════════════════════════════
-//   دروستکردنی بۆت
-// ═══════════════════════════════════════════
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -60,16 +65,50 @@ const client = new Client({
 client.once('ready', () => {
   console.log(`✅ Reklam bot ئامادەیە: ${client.user.tag}`);
   console.log(`📢 چەناڵی ڕیکلام: ${AD_CHANNEL_ID}`);
+  console.log(`⏱️  ماوەی نێوان ڕیکلامەکان: ${AD_INTERVAL_MS / 1000} چرکە`);
 });
 
-// ═══════════════════════════════════════════
-//   وەڵامدانەوەی نامەکان
-// ═══════════════════════════════════════════
+const adQueue = [];
+let isProcessing = false;
+
+async function processQueue() {
+  if (isProcessing) return;
+  isProcessing = true;
+
+  while (adQueue.length > 0) {
+    const item = adQueue.shift();
+    const adChannel = client.channels.cache.get(AD_CHANNEL_ID);
+
+    if (adChannel) {
+      try {
+        await adChannel.send(
+          `${item.author} 🔗 ${item.link}\n\n` +
+          `**هەمووتان join بکەن ❤🌹**`
+        );
+        markLinkPosted(item.link);
+
+        try {
+          await item.author.send(`✅ ڕیکلام داندرا`);
+        } catch (err) {
+          console.log('⚠️ نەتوانرا DM بنێردرێت بۆ:', item.author.tag);
+        }
+
+      } catch (err) {
+        console.log('⚠️ هەڵە لە ناردنی ڕیکلام:', err.message);
+      }
+    }
+
+    await new Promise(resolve => setTimeout(resolve, AD_INTERVAL_MS));
+  }
+
+  isProcessing = false;
+}
+
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
   // ═══════════════════════════════════════════
-  //   بەشی یەکەم: نامە لە DM
+  //   بەشی DM
   // ═══════════════════════════════════════════
   if (message.channel.type === 1) {
 
@@ -84,7 +123,7 @@ client.on('messageCreate', async (message) => {
 
     if (matches.length > 1) {
       return message.reply(
-        `⚠️ تکایە تەنها **یەک لینک** بنێرە! تۆ ${matches.length} لینکت ناردووە.`
+        `⚠️ تکایە تەنها **یەک لینک** بنێرە!`
       );
     }
 
@@ -92,111 +131,91 @@ client.on('messageCreate', async (message) => {
 
     if (hasUsedToday(message.author.id)) {
       return message.reply(
-        `⚠️ تۆ ئەمڕۆ ڕیکلامت کردووە! تەنها **${MAX_DAILY} جار** لە ڕۆژێکدا ڕێگەپێدراوە.\n` +
-        `⏳ سبەینێ دووبارە هەوڵ بدەرەوە.`
+        `⚠️ ئەمڕۆ ڕیکلامت کردوە! لە ڕۆژێکا یەک جار بۆت هەیە ڕیکلام کەیت.`
       );
     }
 
-    const adChannel = client.channels.cache.get(AD_CHANNEL_ID);
-
-    if (adChannel) {
-      await adChannel.send(
-        `${message.author} 🔗 ${link}\n\n` +
-        `**هەمووتان join بکەن ❤🌹**`
-      );
-
-      markUsed(message.author.id);
-      resetAttempts(message.author.id);
-
-      await message.reply(
-        `✅ بە ڕێز ڕیکلامەکەت داندرا ❤️`
-      );
-    } else {
-      await message.reply(
-        `⚠️ چەناڵی reklam نەدۆزرایەوە، تکایە پەیوەندی بە ئەدمین بکە.`
+    if (isLinkPostedToday(link)) {
+      return message.reply(
+        `⚠️ ئەمڕۆ ڕیکلام بۆ ئەم سێرڤەرە کراوە، بەیانی هەوڵبدە.`
       );
     }
+
+    adQueue.push({ author: message.author, link: link });
+    markUsed(message.author.id);
+    resetAttempts(message.author.id);
+
+    await message.reply(`⏳ ڕیکلامەکەت خرایە ڕیزبەندی، دوای کەمێک دادەنرێت.`);
+    processQueue();
     return;
   }
 
   // ═══════════════════════════════════════════
-  //   بەشی دووەم: نامە لە هەموو چەناڵەکان
+  //   بەشی چەناڵی ڕیکلام
   // ═══════════════════════════════════════════
+  if (message.channel.id !== AD_CHANNEL_ID) return;
+
   const content = message.content.toLowerCase();
 
   if (content.includes('ڕیکلام') || content.includes('reklam')) {
 
     if (hasUsedToday(message.author.id)) {
 
-      // ① نامەکەی دیلیت بکە
       try {
         await message.delete();
       } catch (err) {
         console.log('⚠️ نەتوانرا نامەکە بسڕدرێتەوە:', err.message);
       }
 
-      // ② ژماردنی هەوڵەکان
       const attemptCount = incrementAttempts(message.author.id);
 
-      // ③ دیاریکردنی ماوەی تایم ئاوت
-      let timeoutMs;
       if (attemptCount === 1) {
-        timeoutMs = 5 * 60 * 1000; // دووەم جار → 5 خولەک
-      } else {
-        timeoutMs = 24 * 60 * 60 * 1000; // سێیەم جار و زیاتر → 1 ڕۆژ
+        try {
+          await message.author.send(
+            `⚠️ **ئەمڕۆ ڕیکلامت کردوە!**\n\n` +
+            `لە ڕۆژێکا یەک جار بۆت هەیە ڕیکلام کەیت.\n` +
+            `**دووبارەی کەیتەوە timeout ئەکرێت.**`
+          );
+        } catch (err) {
+          console.log('⚠️ نەتوانرا DM بنێردرێت:', err.message);
+        }
+        return;
       }
 
-      // ④ تایم ئاوت بکە
       try {
         if (message.member) {
-          await message.member.timeout(
-            timeoutMs,
-            'دووبارە داواکاری ڕیکلام لە هەمان ڕۆژدا'
-          );
+          await message.member.timeout(TIMEOUT_MS, 'دووجار داوای ڕیکلام لە هەمان ڕۆژدا');
         }
       } catch (err) {
         console.log('⚠️ نەتوانرا تایم ئاوت بکرێت:', err.message);
       }
 
-      // ⑤ ئاگاداری بکەرەوە بە DM (هەردوو دەقە یەکسانن)
       try {
         await message.author.send(
-          `🚫 لەبەر ئەوەی دیسان داوات کرد، ١ ڕۆژ تایم ئاوتیت کرد. تایم ئاوت کرای\n\n` +
-          `تەنها 1 جار لە ڕۆژێکدا ڕێگەپێدراوە.\n` +
-          `⏳ بۆ ماوەی ١ ڕۆژ تایم ئاوت کرایت.\n` +
-          `سبەینێ دووبارە هەوڵ بدەرەوە.`
+          `🚫 **ئەمڕۆ تۆ دووجار داوای ڕیکلامت کردوە، یاساکانت شکان.**\n\n` +
+          `بۆ جاری دووەم بۆیە timeout کرای بۆ **٢٤ کاتژمێر**.`
         );
       } catch (err) {
-        console.log('⚠️ نەتوانرا DM بنێردرێت بۆ:', message.author.tag);
+        console.log('⚠️ نەتوانرا DM بنێردرێت:', err.message);
       }
-
       return;
     }
 
-    // ⬇️ ئەگەر یەکەم جارە
     try {
       await message.author.send(
         `📢 **بانگهێشتنامەی سێرڤەر**\n\n` +
-        `سوپاس بۆ ڕیکلامەکەت!\n\n` +
-        `📩 **لینکی سێرڤەرەکەم بۆ ناردیت.**\n\n` +
-        `🔗 ${SERVER_INVITE}\n\n` +
-        `**هەمووتان join بکەن ❤🌹**\n\n` +
-        `**تۆش لینکی سێرڤەرەکەت بنێرە با لە چەناڵی reklam دایبنێم.**\n\n` +
-        `⚠️ **تێبینی:** تەنها **${MAX_DAILY} جار** لە ڕۆژێکدا ڕێگەپێدراویت.`
+        `📩 **لینکی سێرڤەرم بۆ ناردوویت لە تایبەت، تۆش بینێرە با لە چەناڵی ڕیکلام دایبنێم.**\n\n` +
+        `🔗 ${SERVER_INVITE}`
       );
-
     } catch (err) {
-      console.log('⚠️ نەتوانرا DM بنێردرێت بۆ:', message.author.tag);
-      await message.channel.send(
+      console.log('⚠️ نەتوانرا DM بنێردرێت:', err.message);
+      return message.channel.send(
         `${message.author} ⚠️ نەتوانرا لینکەکەت بۆ بنێرم، تکایە DM ەکەت بکەرەوە.`
       );
-      return;
     }
 
     await message.reply(
-      `✅ سوپاس بۆ ڕیکلامەکەت ${message.author}!\n\n` +
-      `📩 **لینکی سێرڤەرەکەم بۆ ناردیت.**\n` +
-      `**تۆش لینکی سێرڤەرەکەت بنێرە با لە چەناڵی reklam دایبنێم.**`
+      `✅ ${message.author} **لینکی سێرڤەرم بۆ ناردوویت لە تایبەت، تۆش بینێرە با لە چەناڵی ڕیکلام دایبنێم.**`
     );
   }
 });
